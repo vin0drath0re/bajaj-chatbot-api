@@ -5,7 +5,6 @@ langchain-community>=0.0.29
 langchain-google-genai>=0.0.9
 langchain-huggingface>=0.0.4
 
-
 # --- Embeddings + Transformers ---
 huggingface-hub>=0.20.3
 sentence-transformers>=2.6.1
@@ -28,3 +27,6 @@ python-dotenv>=1.0.1
 # --- Caching and Async HTTP Operations ---
 aiohttp
 cachetools
+
+# --- CPU-only PyTorch (avoids 3 GB GPU CUDA libs) ---
+torch==2.2.2+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
