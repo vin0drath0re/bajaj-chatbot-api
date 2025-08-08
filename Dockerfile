@@ -2,21 +2,29 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install build essentials for chromadb & sentence-transformers
+# Install build tools + system libraries needed for chromadb & torch
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
+    curl \
+    pkg-config \
+    libssl-dev \
+    libffi-dev \
+    python3-dev \
+    libsqlite3-dev \
  && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
+# Copy requirements first for caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
+
+# Upgrade pip & install Python deps
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
  && pip install --no-cache-dir -r requirements.txt
 
-# Copy application
+# Copy app files
 COPY . .
 
-# Set default port
+# Default port
 ENV PORT=8000
 
 CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
