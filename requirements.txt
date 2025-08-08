@@ -28,5 +28,8 @@ python-dotenv>=1.0.1
 aiohttp
 cachetools
 
-# --- CPU-only PyTorch (avoids 3 GB GPU CUDA libs) ---
+# --- CPU-only PyTorch ---
 torch==2.2.2+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
+
+# --- Avoid NumPy 2.x breakage ---
+numpy<2
