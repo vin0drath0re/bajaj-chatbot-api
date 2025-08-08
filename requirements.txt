@@ -1,0 +1,26 @@
+# --- LangChain Core + Ecosystem ---
+langchain>=0.1.16
+langchain-core>=0.1.40
+langchain-community>=0.0.29
+langchain-google-genai>=0.0.9
+langchain-huggingface>=0.0.4
+
+
+# --- Embeddings + Transformers ---
+huggingface-hub>=0.20.3
+sentence-transformers>=2.6.1
+transformers>=4.40.0
+
+# --- Vector Store ---
+chromadb>=0.4.24
+
+# --- PDF Parsing ---
+pypdf>=3.10.0
+
+# --- FastAPI Server ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+requests>=2.32.3
+
+# --- Environment Variable Support ---
+python-dotenv>=1.0.1

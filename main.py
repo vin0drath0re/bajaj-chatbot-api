@@ -1,97 +1,80 @@
-from langchain.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.chains import RetrievalQA
-from langchain_community.vectorstores import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import create_tool_calling_agent, AgentExecutor
-from dotenv import load_dotenv
+# main.py
+
 import os
+import sys
+import time
+import logging
+import hashlib
+from logging.handlers import RotatingFileHandler
+from fastapi import FastAPI, HTTPException, Header
+from pydantic import BaseModel
+from typing import List, Optional
 
-load_dotenv()
-os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY3")
+import model  # LangChain logic
 
-system_prompt = ChatPromptTemplate.from_messages([
-    ("system", """
-You are a helpful assistant for an intelligent document reasoning system that handles 
-natural language queries about insurance policies, contracts, and other official documents.
+# --- Logging Setup ---
+os.makedirs("logs", exist_ok=True)
+logger = logging.getLogger("hackrx_logger")
+logger.setLevel(logging.INFO)
 
-Your role is to:
-- Parse vague or plain-English queries to extract structured details like age, gender, location, 
-procedure, and policy duration.
-- Retrieve relevant clauses from provided documents(if any) (PDFs, Word, emails) using semantic understanding, 
-not just keyword matching.
-- Evaluate the query using the retrieved clauses and return a factual response.
+if logger.hasHandlers():
+    logger.handlers.clear()
 
-Guidelines:
-- Only tell the details mentioned in the documents , don't add additional details that are not mentioned in the documents.
-- If required info is missing, return `"decision": "needs_clarification"` and explain what’s needed.
-- If no relevant clause is found, say so and show the closest matching content.
-- Be explainable, traceable, and cautious. Don’t hallucinate.
+formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
 
-Only handle insurance/policy/legal document queries. For unrelated questions, redirect via the general_chat tool.
-    """),
-    MessagesPlaceholder(variable_name="chat_history"),
-    ("human", "{input}"),
-    MessagesPlaceholder(variable_name="agent_scratchpad")
-])
+file_handler = RotatingFileHandler("logs/timings.log.txt", maxBytes=2_000_000, backupCount=3)
+file_handler.setFormatter(formatter)
 
-llm = ChatGoogleGenerativeAI(
-    model="models/gemini-2.0-flash",
-    temperature=0.4
-)
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
 
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
-loader1 = PyPDFLoader(r"C:\Python\Pycharm\Project\bajaj chatbot\Sample1.pdf")
-loader2 = PyPDFLoader(r"C:\Python\Pycharm\Project\bajaj chatbot\Sample2.pdf")
-loader3 = PyPDFLoader(r"C:\Python\Pycharm\Project\bajaj chatbot\Sample3.pdf")
+# --- FastAPI App ---
+app = FastAPI()
+API_KEY = os.getenv("API_KEY", "supersecretkey")
 
-docs1 = loader1.load()
-docs2 = loader2.load()
-docs3 = loader3.load()
+class HackRxRequest(BaseModel):
+    documents: str  # PDF URL
+    questions: List[str]
 
-docs = docs1 + docs2 + docs3
+class HackRxResponse(BaseModel):
+    answers: List[str]
 
-def retriever_from_docs(docs):
-    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(docs)
-    vectorstore = Chroma.from_documents(splits, embeddings)
-    retriever = vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 10, "fetch_k": 30}
-    )
-    qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            retriever=retriever,
-            chain_type="stuff",
-            return_source_documents=False,
-            verbose=True
-        )
-    return qa_chain
+@app.post("/hackrx/run", response_model=HackRxResponse)
+async def run_hackrx(payload: HackRxRequest, authorization: Optional[str] = Header(None)):
+    start_time = time.time()
+    logger.info("New request to /hackrx/run")
 
-static_qa_chain = retriever_from_docs(docs)
+    # Auth check
+    if not authorization or not authorization.startswith("Bearer "):
+        logger.warning("Missing or invalid Authorization header")
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
-@tool
-def ask_query(query: str,user_docs=None) -> dict:
-    """Search documents and return a structured decision based on the policy."""
-    if user_docs:
-        combined_docs = docs + user_docs
-        qa_chain = retriever_from_docs(combined_docs)
-        response = qa_chain.invoke({"query": query})
-    else:
-        response = static_qa_chain.invoke({"query": query})
+    token = authorization.split("Bearer ")[1]
+    if token != API_KEY:
+        logger.warning("Invalid API token")
+        raise HTTPException(status_code=403, detail="Invalid API token")
 
-    return response
-@tool
-def general_chat(message: str) -> str:
-    """Responds to general conversation or small talk and user queries for which other tools are not useful."""
-    return str(llm.invoke(message))
+    source_url = payload.documents
+    try:
+        qa_chain = model.get_qa_chain_for_url(source_url)
+    except Exception as e:
+        logger.exception("Failed to prepare retriever")
+        raise HTTPException(status_code=500, detail=str(e))
 
-tools = [ask_query, general_chat]
-agent_executor = AgentExecutor(
-    agent=create_tool_calling_agent(llm=llm, prompt=system_prompt, tools=tools),
-    tools=tools, verbose=True
-)
+    answers = []
+    for i, question in enumerate(payload.questions):
+        q_start = time.time()
+        logger.info(f"Processing question {i+1}: {question}")
+        try:
+            result = model.ask_query(question, qa_chain=qa_chain)
+            answers.append(result.get("result", "No answer"))
+            logger.info(f"Answered question {i+1} in {time.time() - q_start:.2f} sec")
+        except Exception as e:
+            logger.exception(f"Error answering question {i+1}")
+            answers.append("Error processing question")
+
+    logger.info(f"Total request completed in {time.time() - start_time:.2f} sec")
+    return {"answers": answers}
