@@ -2,10 +2,12 @@
 
 import os
 import time
-import requests
+import asyncio
+import aiohttp
 import tempfile
 import logging
 from dotenv import load_dotenv
+from functools import lru_cache
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -53,41 +55,90 @@ llm = ChatGoogleGenerativeAI(
     temperature=0.4
 )
 
-# --- Utilities ---
+# --- Optimized embeddings (cached) ---
+@lru_cache(maxsize=1)
+def get_embeddings():
+    """Cache embeddings model to avoid reloading"""
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",  # Faster, smaller model
+        model_kwargs={'device': 'cpu'},
+        encode_kwargs={'normalize_embeddings': True}
+    )
 
-def load_pdf_from_url(pdf_url: str):
+# --- HTTP Session for connection pooling ---
+_http_session = None
+
+async def get_http_session():
+    global _http_session
+    if _http_session is None:
+        connector = aiohttp.TCPConnector(limit=100, limit_per_host=30)
+        timeout = aiohttp.ClientTimeout(total=60)
+        _http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    return _http_session
+
+# --- Async Utilities ---
+
+async def load_pdf_from_url_async(pdf_url: str):
     start = time.time()
+    session = await get_http_session()
+    
     try:
-        response = requests.get(pdf_url)
-        response.raise_for_status()
+        async with session.get(pdf_url) as response:
+            response.raise_for_status()
+            content = await response.read()
     except Exception as e:
         logger.exception("Failed to download PDF")
         raise ValueError(f"Error fetching PDF: {str(e)}")
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(response.content)
-        tmp_file_path = tmp_file.name
-
-    loader = PyPDFLoader(tmp_file_path)
-    docs = loader.load()
-    os.unlink(tmp_file_path)
-
+    # Run PDF processing in thread pool to avoid blocking
+    loop = asyncio.get_event_loop()
+    docs = await loop.run_in_executor(None, _process_pdf_content, content)
+    
     logger.info(f"PDF downloaded and loaded in {time.time() - start:.2f} sec")
     return docs
 
-def retriever_from_docs(docs):
-    start = time.time()
-    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    splits = text_splitter.split_documents(docs)
+def _process_pdf_content(content: bytes):
+    """Helper function to process PDF content in thread pool"""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(content)
+        tmp_file_path = tmp_file.name
 
+    try:
+        loader = PyPDFLoader(tmp_file_path)
+        docs = loader.load()
+    finally:
+        os.unlink(tmp_file_path)
+    
+    return docs
+
+async def retriever_from_docs_async(docs):
+    start = time.time()
+    embeddings = get_embeddings()
+    
+    # Optimized text splitting
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,  # Reduced chunk size for faster processing
+        chunk_overlap=100,
+        separators=["\n\n", "\n", ". ", " ", ""]
+    )
+    
+    # Run text splitting in thread pool
+    loop = asyncio.get_event_loop()
+    splits = await loop.run_in_executor(None, text_splitter.split_documents, docs)
+    
     logger.info(f"Split into {len(splits)} chunks")
 
-    vectorstore = Chroma.from_documents(splits, embeddings)
+    # Run vector store creation in thread pool
+    vectorstore = await loop.run_in_executor(
+        None, 
+        lambda: Chroma.from_documents(splits, embeddings)
+    )
+    
     retriever = vectorstore.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": 10, "fetch_k": 30}
+        search_kwargs={"k": 6, "fetch_k": 20}  # Reduced for faster retrieval
     )
+    
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         retriever=retriever,
@@ -99,11 +150,38 @@ def retriever_from_docs(docs):
     logger.info(f"Retriever initialized in {time.time() - start:.2f} sec")
     return qa_chain
 
-def ask_query(query: str, qa_chain=None) -> dict:
+async def ask_query_async(query: str, qa_chain=None) -> dict:
     if not qa_chain:
         raise ValueError("Retriever QA chain not provided.")
     
     start = time.time()
-    response = qa_chain.invoke({"query": query})
+    # Run LLM query in thread pool
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(
+        None, 
+        qa_chain.invoke, 
+        {"query": query}
+    )
     logger.info(f"LLM responded in {time.time() - start:.2f} sec")
     return response
+
+# --- Async wrapper functions ---
+
+async def get_qa_chain_for_url_async(source_url: str):
+    """Async version of get_qa_chain_for_url"""
+    docs = await load_pdf_from_url_async(source_url)
+    return await retriever_from_docs_async(docs)
+
+# --- Backward compatibility (sync functions) ---
+
+def load_pdf_from_url(pdf_url: str):
+    return asyncio.run(load_pdf_from_url_async(pdf_url))
+
+def retriever_from_docs(docs):
+    return asyncio.run(retriever_from_docs_async(docs))
+
+def get_qa_chain_for_url(source_url: str):
+    return asyncio.run(get_qa_chain_for_url_async(source_url))
+
+def ask_query(query: str, qa_chain=None) -> dict:
+    return asyncio.run(ask_query_async(query, qa_chain))

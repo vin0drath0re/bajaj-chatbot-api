@@ -5,10 +5,12 @@ import sys
 import time
 import logging
 import hashlib
+import asyncio
 from logging.handlers import RotatingFileHandler
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from typing import List, Optional
+from cachetools import TTLCache
 
 import model  # LangChain logic
 
@@ -35,12 +37,19 @@ logger.addHandler(console_handler)
 app = FastAPI()
 API_KEY = os.getenv("API_KEY", "supersecretkey")
 
+# Cache for QA chains (TTL: 1 hour, max 100 documents)
+qa_cache = TTLCache(maxsize=100, ttl=3600)
+
 class HackRxRequest(BaseModel):
     documents: str  # PDF URL
     questions: List[str]
 
 class HackRxResponse(BaseModel):
     answers: List[str]
+
+def get_cache_key(url: str) -> str:
+    """Generate cache key from URL"""
+    return hashlib.md5(url.encode()).hexdigest()
 
 @app.post("/hackrx/run", response_model=HackRxResponse)
 async def run_hackrx(payload: HackRxRequest, authorization: Optional[str] = Header(None)):
@@ -58,23 +67,39 @@ async def run_hackrx(payload: HackRxRequest, authorization: Optional[str] = Head
         raise HTTPException(status_code=403, detail="Invalid API token")
 
     source_url = payload.documents
-    try:
-        qa_chain = model.get_qa_chain_for_url(source_url)
-    except Exception as e:
-        logger.exception("Failed to prepare retriever")
-        raise HTTPException(status_code=500, detail=str(e))
-
-    answers = []
-    for i, question in enumerate(payload.questions):
-        q_start = time.time()
-        logger.info(f"Processing question {i+1}: {question}")
+    cache_key = get_cache_key(source_url)
+    
+    # Try to get QA chain from cache
+    qa_chain = qa_cache.get(cache_key)
+    if qa_chain:
+        logger.info("Using cached QA chain")
+    else:
         try:
-            result = model.ask_query(question, qa_chain=qa_chain)
-            answers.append(result.get("result", "No answer"))
-            logger.info(f"Answered question {i+1} in {time.time() - q_start:.2f} sec")
+            qa_chain = await model.get_qa_chain_for_url_async(source_url)
+            qa_cache[cache_key] = qa_chain
+            logger.info("QA chain cached for future use")
         except Exception as e:
-            logger.exception(f"Error answering question {i+1}")
-            answers.append("Error processing question")
+            logger.exception("Failed to prepare retriever")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Process questions concurrently
+    tasks = []
+    for i, question in enumerate(payload.questions):
+        logger.info(f"Queuing question {i+1}: {question}")
+        tasks.append(model.ask_query_async(question, qa_chain=qa_chain))
+    
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        answers = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.exception(f"Error answering question {i+1}")
+                answers.append("Error processing question")
+            else:
+                answers.append(result.get("result", "No answer"))
+    except Exception as e:
+        logger.exception("Error processing questions concurrently")
+        raise HTTPException(status_code=500, detail="Error processing questions")
 
     logger.info(f"Total request completed in {time.time() - start_time:.2f} sec")
     return {"answers": answers}

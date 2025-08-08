@@ -24,3 +24,7 @@ requests>=2.32.3
 
 # --- Environment Variable Support ---
 python-dotenv>=1.0.1
+
+# --- Caching and Async HTTP Operations ---
+aiohttp
+cachetools
