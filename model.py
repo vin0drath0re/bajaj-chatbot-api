@@ -16,6 +16,7 @@ from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+import torch
 
 # --- Logger ---
 logger = logging.getLogger("hackrx_logger")
@@ -42,6 +43,7 @@ Guidelines:
 - If required info is missing, return `"decision": "needs_clarification"` and explain what’s needed.
 - If no relevant clause is found, say so and show the closest matching content.
 - Be explainable, traceable, and cautious. Don’t hallucinate.
+- Give maximum 1 to 2 line answers.
 
 Only handle insurance/policy/legal document queries. For unrelated questions, redirect via the general_chat tool.
     """),
@@ -59,9 +61,10 @@ llm = ChatGoogleGenerativeAI(
 @lru_cache(maxsize=1)
 def get_embeddings():
     """Cache embeddings model to avoid reloading"""
+    device = 'cpu'
     return HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",  # Faster, smaller model
-        model_kwargs={'device': 'cpu'},
+        model_kwargs={'device': device},
         encode_kwargs={'normalize_embeddings': True}
     )
 
@@ -118,7 +121,7 @@ async def retriever_from_docs_async(docs):
     # Optimized text splitting
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,  # Reduced chunk size for faster processing
-        chunk_overlap=100,
+        chunk_overlap=160,
         separators=["\n\n", "\n", ". ", " ", ""]
     )
     
@@ -136,7 +139,7 @@ async def retriever_from_docs_async(docs):
     
     retriever = vectorstore.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": 6, "fetch_k": 20}  # Reduced for faster retrieval
+        search_kwargs={"k": 5, "fetch_k": 15}  # Reduced for faster retrieval
     )
     
     qa_chain = RetrievalQA.from_chain_type(

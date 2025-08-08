@@ -24,7 +24,7 @@ if logger.hasHandlers():
 
 formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
 
-file_handler = RotatingFileHandler("logs/timings.log.txt", maxBytes=2_000_000, backupCount=3)
+file_handler = RotatingFileHandler("logs/timings.log", maxBytes=2_000_000, backupCount=3)
 file_handler.setFormatter(formatter)
 
 console_handler = logging.StreamHandler(sys.stdout)
@@ -51,10 +51,10 @@ def get_cache_key(url: str) -> str:
     """Generate cache key from URL"""
     return hashlib.md5(url.encode()).hexdigest()
 
-@app.post("/hackrx/run", response_model=HackRxResponse)
+@app.post("/api/v1/hackrx/run", response_model=HackRxResponse)
 async def run_hackrx(payload: HackRxRequest, authorization: Optional[str] = Header(None)):
     start_time = time.time()
-    logger.info("New request to /hackrx/run")
+    logger.info("New request to api/v1/hackrx/run")
 
     # Auth check
     if not authorization or not authorization.startswith("Bearer "):
